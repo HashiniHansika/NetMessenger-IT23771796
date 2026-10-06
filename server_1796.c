@@ -344,6 +344,87 @@ else if (strncmp(buffer, "BCAST ", 6) == 0)
                       "OK SENT NID:7717\n");
     }
 }
+else if (strncmp(buffer, "PMSG ", 5) == 0)
+{
+    char target_username[USERNAME_SIZE];
+    char message[BUFFER_SIZE];
+
+    char *space = strchr(buffer + 5, ' ');
+
+    if (space == NULL)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_MESSAGE NID:7717\n");
+    }
+    else
+    {
+        size_t username_length = space - (buffer + 5);
+
+        if (username_length == 0 ||
+            username_length >= USERNAME_SIZE)
+        {
+            send_response(client->socket_fd,
+                          "ERR 003 INVALID_USERNAME NID:7717\n");
+        }
+        else
+        {
+            strncpy(target_username, buffer + 5, username_length);
+            target_username[username_length] = '\0';
+
+            strcpy(message, space + 1);
+
+            if (strlen(message) == 0)
+            {
+                send_response(client->socket_fd,
+                              "ERR 003 INVALID_MESSAGE NID:7717\n");
+            }
+            else
+            {
+                int target_found = 0;
+
+                char private_message[BUFFER_SIZE];
+
+                snprintf(private_message,
+                         sizeof(private_message),
+                         "MSG PMSG %s %s\n",
+                         client->username,
+                         message);
+
+                pthread_mutex_lock(&clients_mutex);
+
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                {
+                    if (clients[i] != NULL &&
+                        clients[i]->registered &&
+                        strcmp(clients[i]->username,
+                               target_username) == 0)
+                    {
+                        send(clients[i]->socket_fd,
+                             private_message,
+                             strlen(private_message),
+                             MSG_NOSIGNAL);
+
+                        target_found = 1;
+                        break;
+                    }
+                }
+
+                pthread_mutex_unlock(&clients_mutex);
+
+                if (target_found)
+                {
+                    send_response(client->socket_fd,
+                                  "OK SENT NID:7717\n");
+                }
+                else
+                {
+                    send_response(client->socket_fd,
+                                  "ERR 002 USER_NOT_FOUND NID:7717\n");
+                }
+            }
+        }
+    }
+}
 
             /* =================================================
                LIST
