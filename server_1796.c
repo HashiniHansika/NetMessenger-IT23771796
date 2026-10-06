@@ -13,12 +13,14 @@
 #define USERNAME_SIZE 50
 
 #define NID "7717"
+#define ROOM_NAME_SIZE 50
 
 /* Information about a connected user */
 typedef struct {
     int socket_fd;
     char username[USERNAME_SIZE];
     int registered;
+    char room[ROOM_NAME_SIZE];
 } client_t;
 
 /* Shared client list */
@@ -421,6 +423,210 @@ else if (strncmp(buffer, "PMSG ", 5) == 0)
                     send_response(client->socket_fd,
                                   "ERR 002 USER_NOT_FOUND NID:7717\n");
                 }
+            }
+        }
+    }
+}
+else if (strncmp(buffer, "JOIN ", 5) == 0)
+{
+    char *room_name = buffer + 5;
+
+    if (strlen(room_name) == 0)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_ROOM NID:7717\n");
+    }
+    else if (strlen(room_name) >= ROOM_NAME_SIZE)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_ROOM NID:7717\n");
+    }
+    else
+    {
+        strncpy(client->room, room_name, ROOM_NAME_SIZE - 1);
+        client->room[ROOM_NAME_SIZE - 1] = '\0';
+
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "OK JOINED %s NID:7717\n",
+                 client->room);
+
+        send_response(client->socket_fd, response);
+    }
+}
+else if (strncmp(buffer, "LEAVE ", 6) == 0)
+{
+    char *room_name = buffer + 6;
+
+    if (strlen(room_name) == 0)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_ROOM NID:7717\n");
+    }
+    else if (strlen(room_name) >= ROOM_NAME_SIZE)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_ROOM NID:7717\n");
+    }
+    else if (strcmp(client->room, room_name) != 0)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 NOT_IN_ROOM NID:7717\n");
+    }
+    else
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "OK LEFT %s NID:7717\n",
+                 client->room);
+
+        client->room[0] = '\0';
+
+        send_response(client->socket_fd, response);
+    }
+}
+else if (strcmp(buffer, "ROOMS") == 0)
+{
+    char rooms[BUFFER_SIZE] = "";
+    int first_room = 1;
+
+    pthread_mutex_lock(&clients_mutex);
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (clients[i] != NULL &&
+            clients[i]->registered &&
+            clients[i]->room[0] != '\0')
+        {
+            int already_added = 0;
+
+            char temp_rooms[BUFFER_SIZE];
+            strncpy(temp_rooms, rooms, sizeof(temp_rooms) - 1);
+            temp_rooms[sizeof(temp_rooms) - 1] = '\0';
+
+            char *token = strtok(temp_rooms, ",");
+
+            while (token != NULL)
+            {
+                if (strcmp(token, clients[i]->room) == 0)
+                {
+                    already_added = 1;
+                    break;
+                }
+
+                token = strtok(NULL, ",");
+            }
+
+            if (!already_added)
+            {
+                if (!first_room)
+                {
+                    strncat(rooms, ",", sizeof(rooms) - strlen(rooms) - 1);
+                }
+
+                strncat(rooms,
+                        clients[i]->room,
+                        sizeof(rooms) - strlen(rooms) - 1);
+
+                first_room = 0;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&clients_mutex);
+
+    char response[BUFFER_SIZE];
+
+    if (strlen(rooms) > 0)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "OK ROOMS %.980s NID:7717\n",
+                 rooms);
+    }
+    else
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "OK ROOMS NID:7717\n");
+    }
+
+    send_response(client->socket_fd, response);
+}
+else if (strncmp(buffer, "RMSG ", 5) == 0)
+{
+    char *space = strchr(buffer + 5, ' ');
+
+    if (space == NULL)
+    {
+        send_response(client->socket_fd,
+                      "ERR 003 INVALID_MESSAGE NID:7717\n");
+    }
+    else
+    {
+        char room_name[ROOM_NAME_SIZE];
+        char *message = space + 1;
+
+        size_t room_length = space - (buffer + 5);
+
+        if (room_length == 0 ||
+            room_length >= ROOM_NAME_SIZE ||
+            strlen(message) == 0)
+        {
+            send_response(client->socket_fd,
+                          "ERR 003 INVALID_MESSAGE NID:7717\n");
+        }
+        else
+        {
+            strncpy(room_name, buffer + 5, room_length);
+            room_name[room_length] = '\0';
+
+            if (strcmp(client->room, room_name) != 0)
+            {
+                send_response(client->socket_fd,
+                              "ERR 003 NOT_IN_ROOM NID:7717\n");
+            }
+            else
+            {
+                char room_message[BUFFER_SIZE];
+
+                snprintf(room_message,
+                         sizeof(room_message),
+                         "MSG ROOM %s %s %s\n",
+                         room_name,
+                         client->username,
+                         message);
+
+                int sent_to_someone = 0;
+
+                pthread_mutex_lock(&clients_mutex);
+
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                {
+                    if (clients[i] != NULL &&
+                        clients[i]->registered &&
+                        clients[i] != client &&
+                        strcmp(clients[i]->room, room_name) == 0)
+                    {
+                        send(clients[i]->socket_fd,
+                             room_message,
+                             strlen(room_message),
+                             MSG_NOSIGNAL);
+
+                        sent_to_someone = 1;
+                    }
+                }
+
+                pthread_mutex_unlock(&clients_mutex);
+
+                send_response(client->socket_fd,
+                              "OK SENT NID:7717\n");
+
+                (void)sent_to_someone;
             }
         }
     }
