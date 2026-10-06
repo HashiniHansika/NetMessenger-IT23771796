@@ -6,15 +6,173 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <signal.h>
-
+#include <errno.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <stdarg.h>
 #define PORT 7796
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 10
 #define USERNAME_SIZE 50
-
+#define MAX_FILE_SIZE (10 * 1024 * 1024)
 #define NID "7717"
 #define ROOM_NAME_SIZE 50
+#define LOG_FILE "netmsg_IT23771796.log"
+void log_event(const char *format, ...)
+{
+    FILE *log_file = fopen(LOG_FILE, "a");
 
+    if (log_file == NULL)
+    {
+        perror("fopen log");
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm *local_time = localtime(&now);
+
+    if (local_time == NULL)
+    {
+        fclose(log_file);
+        return;
+    }
+
+    char timestamp[64];
+
+    strftime(timestamp,
+             sizeof(timestamp),
+             "%Y-%m-%d %H:%M:%S",
+             local_time);
+
+    fprintf(log_file, "[%s] ", timestamp);
+
+    va_list args;
+    va_start(args, format);
+
+    vfprintf(log_file, format, args);
+
+    va_end(args);
+
+    fprintf(log_file, "\n");
+
+    fclose(log_file);
+}
+int recv_line(int fd, char *buffer, size_t size)
+{
+    size_t i = 0;
+
+    while (i < size - 1)
+    {
+        char c;
+
+        ssize_t n = recv(fd, &c, 1, 0);
+
+        if (n == 0)
+        {
+            return 0;
+        }
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -1;
+        }
+
+        if (c == '\n')
+        {
+            buffer[i] = '\0';
+
+            /* Remove \r if the client sends \r\n */
+            if (i > 0 && buffer[i - 1] == '\r')
+            {
+                buffer[i - 1] = '\0';
+            }
+
+            return 1;
+        }
+
+        buffer[i] = c;
+        i++;
+    }
+
+    buffer[i] = '\0';
+
+    /* Line is too long */
+    return -2;
+}
+int recv_file(int fd, const char *filepath, long filesize)
+{
+    FILE *file = fopen(filepath, "wb");
+
+    if (file == NULL)
+    {
+        perror("fopen");
+        return -1;
+    }
+
+    long total_received = 0;
+
+    while (total_received < filesize)
+    {
+        char file_buffer[4096];
+
+        long remaining = filesize - total_received;
+
+        size_t chunk_size = sizeof(file_buffer);
+
+        if (remaining < (long)chunk_size)
+        {
+            chunk_size = (size_t)remaining;
+        }
+
+        ssize_t bytes_received =
+            recv(fd,
+                 file_buffer,
+                 chunk_size,
+                 0);
+
+        if (bytes_received == 0)
+        {
+            fclose(file);
+            return 0;
+        }
+
+        if (bytes_received < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            perror("recv");
+            fclose(file);
+            return -1;
+        }
+
+        size_t bytes_written =
+            fwrite(file_buffer,
+                   1,
+                   bytes_received,
+                   file);
+
+        if (bytes_written != (size_t)bytes_received)
+        {
+            perror("fwrite");
+            fclose(file);
+            return -1;
+        }
+
+        total_received += bytes_received;
+    }
+
+    fclose(file);
+
+    return 1;
+}
 /* Information about a connected user */
 typedef struct {
     int socket_fd;
@@ -22,9 +180,11 @@ typedef struct {
     int registered;
     char room[ROOM_NAME_SIZE];
 } client_t;
-
+         
 /* Shared client list */
 client_t *clients[MAX_CLIENTS];
+
+
 
 /* Mutex protects the shared client list */
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -171,32 +331,216 @@ void *handle_client(void *arg)
 
     printf("Client connected. Socket: %d\n",
            client_fd);
+log_event("Client connected. Socket: %d", client_fd);
 
+   while (1)
+{
+    memset(buffer, 0, sizeof(buffer));
 
-    while (1) {
+    int line_result =
+        recv_line(client_fd,
+                  buffer,
+                  sizeof(buffer));
 
-        memset(buffer, 0, sizeof(buffer));
+    if (line_result == 0)
+    {
+        /* Client disconnected */
+        break;
+    }
 
-        int bytes_received =
+    if (line_result == -1)
+    {
+        perror("recv_line");
+        break;
+    }
+
+    if (line_result == -2)
+    {
+        send_response(client_fd,
+                      "ERR 003 INVALID_MESSAGE NID:7717\n");
+        continue;
+    }
+
+    printf("Client %d sent: %s\n",
+           client_fd,
+           buffer);
+/* SENDFILE */
+ if (strncmp(buffer, "SENDFILE ", 9) == 0)
+{
+    char target_username[USERNAME_SIZE];
+    char filename[256];
+    long filesize;
+
+    int parsed = sscanf(buffer + 9,
+                        "%49s %255s %ld",
+                        target_username,
+                        filename,
+                        &filesize);
+
+    if (parsed != 3)
+    {
+        send_response(client_fd,
+                      "ERR 003 INVALID_FILE NID:7717\n");
+        continue;
+    }
+
+    if (filesize <= 0 || filesize > MAX_FILE_SIZE)
+    {
+        send_response(client_fd,
+                      "ERR 004 FILE_TOO_LARGE NID:7717\n");
+        continue;
+    }
+
+    /* Check whether target user exists */
+    int target_found = 0;
+
+    pthread_mutex_lock(&clients_mutex);
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (clients[i] != NULL &&
+            clients[i]->registered &&
+            strcmp(clients[i]->username,
+                   target_username) == 0)
+        {
+            target_found = 1;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&clients_mutex);
+
+    if (!target_found)
+{
+    /*
+     * The client has already sent the file header,
+     * and it will send the raw file bytes next.
+     *
+     * We must consume exactly 'filesize' bytes
+     * before reporting the error. Otherwise those
+     * bytes would be interpreted as another command.
+     */
+
+    char discard_buffer[4096];
+    long total_discarded = 0;
+
+    while (total_discarded < filesize)
+    {
+        long remaining = filesize - total_discarded;
+
+        size_t chunk_size = sizeof(discard_buffer);
+
+        if (remaining < (long)chunk_size)
+        {
+            chunk_size = (size_t)remaining;
+        }
+
+        ssize_t bytes_received =
             recv(client_fd,
-                 buffer,
-                 sizeof(buffer) - 1,
+                 discard_buffer,
+                 chunk_size,
                  0);
 
+        if (bytes_received == 0)
+        {
+            break;
+        }
 
-        /* -------------------------------------------------
-           Client sent data
-           ------------------------------------------------- */
-        if (bytes_received > 0) {
+        if (bytes_received < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
 
-            buffer[bytes_received] = '\0';
+            break;
+        }
 
-            /* Remove newline if present */
-            buffer[strcspn(buffer, "\r\n")] = '\0';
+        total_discarded += bytes_received;
+    }
 
-            printf("Client %d sent: %s\n",
-                   client_fd,
-                   buffer);
+    send_response(client_fd,
+                  "ERR 002 USER_NOT_FOUND NID:7717\n");
+
+    continue;
+}
+
+    /* Basic filename security check */
+    if (strlen(filename) == 0 ||
+        strchr(filename, '/') != NULL ||
+        strstr(filename, "..") != NULL)
+    {
+        send_response(client_fd,
+                      "ERR 003 INVALID_FILE NID:7717\n");
+        continue;
+    }
+
+    /*
+     * Create storage directories
+     */
+    mkdir("storage", 0755);
+    mkdir("storage/IT23771796", 0755);
+
+    char sender_directory[512];
+
+    snprintf(sender_directory,
+             sizeof(sender_directory),
+             "storage/IT23771796/%s",
+             client->username);
+
+    mkdir(sender_directory, 0755);
+
+    /*
+     * Create complete file path
+     */
+    char filepath[768];
+
+    snprintf(filepath,
+             sizeof(filepath),
+             "%s/%s",
+             sender_directory,
+             filename);
+
+    printf("Receiving file from %s: %s (%ld bytes)\n",
+           client->username,
+           filename,
+           filesize);
+
+    /*
+     * Receive exactly 'filesize' bytes
+     */
+    int file_result =
+        recv_file(client_fd,
+                  filepath,
+                  filesize);
+
+    if (file_result == 1) {
+    printf("File received successfully: %s\n",
+           filepath);
+
+    log_event("File received from %s: %s (%ld bytes)",
+              client->username,
+              filename,
+              filesize);
+
+    send_response(client_fd,
+                  "OK FILE_RECEIVED NID:7717\n");
+
+    }
+    else if (file_result == 0)
+    {
+        printf("Client disconnected during file transfer.\n");
+        break;
+    }
+    else
+    {
+        send_response(client_fd,
+                      "ERR 003 FILE_TRANSFER_FAILED NID:7717\n");
+    }
+
+    continue;
+}
+    /* REGISTER */
 
 
             /* =================================================
@@ -204,7 +548,6 @@ void *handle_client(void *arg)
                ================================================= */
 
             if (strncmp(buffer, "REGISTER ", 9) == 0) {
-
                 char username[USERNAME_SIZE];
 
                 memset(username, 0, sizeof(username));
@@ -294,6 +637,7 @@ void *handle_client(void *arg)
 
                printf("User registered: %s\n",
        client->username);
+log_event("User registered: %s", client->username);
 
 /* Notify other connected users */
 char presence_message[BUFFER_SIZE];
@@ -344,6 +688,9 @@ else if (strncmp(buffer, "BCAST ", 6) == 0)
 
         send_response(client->socket_fd,
                       "OK SENT NID:7717\n");
+log_event("BCAST from %s: %s",
+          client->username,
+          message);
     }
 }
 else if (strncmp(buffer, "PMSG ", 5) == 0)
@@ -386,11 +733,11 @@ else if (strncmp(buffer, "PMSG ", 5) == 0)
 
                 char private_message[BUFFER_SIZE];
 
-                snprintf(private_message,
-                         sizeof(private_message),
-                         "MSG PMSG %s %s\n",
-                         client->username,
-                         message);
+               snprintf(private_message,
+         sizeof(private_message),
+         "MSG PMSG %.49s %.950s\n",
+         client->username,
+         message);
 
                 pthread_mutex_lock(&clients_mutex);
 
@@ -417,6 +764,10 @@ else if (strncmp(buffer, "PMSG ", 5) == 0)
                 {
                     send_response(client->socket_fd,
                                   "OK SENT NID:7717\n");
+log_event("PMSG from %s to %s: %s",
+          client->username,
+          target_username,
+          message);
                 }
                 else
                 {
@@ -454,6 +805,9 @@ else if (strncmp(buffer, "JOIN ", 5) == 0)
                  client->room);
 
         send_response(client->socket_fd, response);
+log_event("User %s joined room %s",
+          client->username,
+          client->room);
     }
 }
 else if (strncmp(buffer, "LEAVE ", 6) == 0)
@@ -487,6 +841,9 @@ else if (strncmp(buffer, "LEAVE ", 6) == 0)
         client->room[0] = '\0';
 
         send_response(client->socket_fd, response);
+log_event("User %s left room %s",
+          client->username,
+          room_name);
     }
 }
 else if (strcmp(buffer, "ROOMS") == 0)
@@ -625,6 +982,10 @@ else if (strncmp(buffer, "RMSG ", 5) == 0)
 
                 send_response(client->socket_fd,
                               "OK SENT NID:7717\n");
+log_event("RMSG from %s in room %s: %s",
+          client->username,
+          room_name,
+          message);
 
                 (void)sent_to_someone;
             }
@@ -713,7 +1074,9 @@ else if (strncmp(buffer, "RMSG ", 5) == 0)
                 printf("User requested disconnect: %s\n",
                        client->registered ?
                        client->username : "unregistered");
-
+    log_event("User disconnected: %s",
+              client->registered ?
+              client->username : "unregistered");
                 break;
             }
 
@@ -740,24 +1103,8 @@ else if (strncmp(buffer, "RMSG ", 5) == 0)
         /* -------------------------------------------------
            Client disconnected normally
            ------------------------------------------------- */
-        else if (bytes_received == 0) {
-
-            printf("Client %d disconnected.\n",
-                   client_fd);
-
-            break;
-        }
-
-
-        /* -------------------------------------------------
-           Receive error
-           ------------------------------------------------- */
-        else {
-
-            perror("recv");
-            break;
-        }
-    }
+      
+    
 
 
     /* Remove registered client from shared list */
