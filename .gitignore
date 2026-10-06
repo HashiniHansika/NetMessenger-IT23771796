@@ -1,0 +1,14 @@
+# Compiled executables
+server_1796
+client_1796
+
+# Temporary backup source files
+*_backup.c
+*_FINAL_SAFE.c
+
+# Temporary test files
+test.txt
+large_test.bin
+
+# Object files
+*.o
