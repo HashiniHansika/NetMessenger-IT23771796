@@ -25,3 +25,23 @@
 [2026-10-06 14:34:17] Client connected. Socket: 8
 [2026-10-06 14:34:31] User registered: user5
 [2026-10-06 14:35:11] BCAST from user1: Hello from 5 clients
+[2026-10-07 19:26:32] Client connected. Socket: 4
+[2026-10-07 19:26:48] User registered: REGISTER hashini
+[2026-10-07 19:27:20] Client connected. Socket: 5
+[2026-10-07 19:27:33] User registered: sathsara
+[2026-10-07 19:27:50] Client connected. Socket: 6
+[2026-10-07 19:30:29] Client connected. Socket: 4
+[2026-10-07 19:30:33] User registered: hashini
+[2026-10-07 19:30:58] Client connected. Socket: 5
+[2026-10-07 19:31:03] User registered: sathsara
+[2026-10-07 19:31:18] Client connected. Socket: 6
+[2026-10-07 20:32:35] Client connected. Socket: 4
+[2026-10-07 20:32:38] User registered: user1
+[2026-10-07 20:32:42] Client connected. Socket: 5
+[2026-10-07 20:32:45] User registered: user2
+[2026-10-07 20:32:49] Client connected. Socket: 6
+[2026-10-07 20:32:53] User registered: user3
+[2026-10-07 20:33:34] Client connected. Socket: 7
+[2026-10-07 20:33:39] User registered: user4
+[2026-10-07 20:33:54] Client connected. Socket: 8
+[2026-10-07 20:33:58] User registered: user5
